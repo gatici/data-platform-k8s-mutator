@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensearch-sysctl-webhook
+  namespace: webhooks
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opensearch-sysctl-webhook
+  template:
+    metadata:
+      labels:
+        app: opensearch-sysctl-webhook
+    spec:
+      containers:
+        - name: webhook
+          image: localhost:32000/data-platform-k8s-mutator:1.3
+          env:
+            # optional extra scope. leave empty to match any labels.
+            - name: TARGET_LABELS
+              value: app.kubernetes.io/managed-by=juju
+            # container names to match (comma-separated).
+            - name: TARGET_CONTAINER_NAMES
+              value: opensearch
+            - name: SYSCTL_NAME
+              value: net.ipv4.tcp_retries2
+            - name: SYSCTL_VALUE
+              value: "5"
+            # empty string matches any image.
+            - name: TARGET_IMAGE_SUBSTR
+              value: ""
+          ports:
+            - containerPort: 8443
+              name: https
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+          command: ["uvicorn"]
+          args:
+            - "app.app:app"
+            - "--host=0.0.0.0"
+            - "--port=8443"
+            - "--ssl-keyfile=/tls/tls.key"
+            - "--ssl-certfile=/tls/tls.crt"
+      volumes:
+        - name: tls
+          secret:
+            secretName: opensearch-sysctl-webhook-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensearch-sysctl-webhook
+  namespace: webhooks
+spec:
+  selector:
+    app: opensearch-sysctl-webhook
+  ports:
+    - name: https
+      port: 443
+      targetPort: 8443
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: opensearch-sysctl-webhook
+  annotations:
+    cert-manager.io/inject-ca-from: webhooks/opensearch-sysctl-webhook-cert
+webhooks:
+  - name: opensearch-sysctl.webhooks.local
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    # prefer not to break the cluster if the webhook is down.
+    failurePolicy: Ignore
+    matchPolicy: Equivalent
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: opensearch-sysctl-webhook
+        namespace: webhooks
+        path: /mutate
+        port: 443
+    rules:
+      # only mutate NEW StatefulSets.
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["statefulsets"]

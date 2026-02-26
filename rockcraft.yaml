@@ -2,12 +2,18 @@
 # See LICENSE file for licensing details.
 name: data-platform-k8s-mutator
 base: ubuntu@24.04
-version: '0.1'
-summary: Mutating Webhook for terminationGracePeriodSeconds
+version: "1.3"
+summary: Mutating Webhook for sysctls
 description: |
-  This small fastapi application is a mutating webhook application to fix the
-  terminationGracePeriodSeconds issue on database charms being too low
+  Mutating webhook that injects sysctls into OpenSearch StatefulSets.
 platforms:
-    amd64:
+  amd64:
 extensions:
-    - fastapi-framework
+  - fastapi-framework
+
+parts:
+  fastapi-framework/install-app:
+    source: .
+    prime:
+      - app/app.py
+      - app/requirements.txt

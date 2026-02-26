@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: webhooks
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: selfsigned
+  namespace: webhooks
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: opensearch-sysctl-webhook-cert
+  namespace: webhooks
+spec:
+  secretName: opensearch-sysctl-webhook-tls
+  dnsNames:
+    - opensearch-sysctl-webhook.webhooks.svc
+    - opensearch-sysctl-webhook.webhooks.svc.cluster.local
+  issuerRef:
+    name: selfsigned
