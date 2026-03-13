@@ -74,16 +74,28 @@ class TestPodSpecHasMatchingContainer:
         mock_config.target_container_names = ["app"]
         mock_config.target_image_substr = "myimage"
         with patch("app.CFG", mock_config):
-            assert _pod_spec_has_matching_container({
-                "containers": [{"name": "app", "image": "repo/myimage:1.0"}],
-            }) is True
-            assert _pod_spec_has_matching_container({
-                "containers": [{"name": "app", "image": "other:1.0"}],
-            }) is False
+            assert (
+                _pod_spec_has_matching_container(
+                    {
+                        "containers": [{"name": "app", "image": "repo/myimage:1.0"}],
+                    }
+                )
+                is True
+            )
+            assert (
+                _pod_spec_has_matching_container(
+                    {
+                        "containers": [{"name": "app", "image": "other:1.0"}],
+                    }
+                )
+                is False
+            )
 
 
 class TestObjectMatchesScope:
-    def test_object_matches_scope_when_juju_managed_and_container_match_then_true(self, mock_config, deployment_with_pod_template):
+    def test_object_matches_scope_when_juju_managed_and_container_match_then_true(
+        self, mock_config, deployment_with_pod_template
+    ):
         mock_config.target_namespaces = []
         mock_config.target_labels = {}
         mock_config.require_juju_managed = True
@@ -91,14 +103,20 @@ class TestObjectMatchesScope:
         with patch("app.CFG", mock_config):
             assert _object_matches_scope(deployment_with_pod_template) is True
 
-    def test_object_matches_scope_when_no_juju_label_then_false(self, mock_config, deployment_with_pod_template):
+    def test_object_matches_scope_when_no_juju_label_then_false(
+        self, mock_config, deployment_with_pod_template
+    ):
         mock_config.require_juju_managed = True
         mock_config.target_container_names = ["app"]
-        deployment_with_pod_template["metadata"]["labels"].pop("app.kubernetes.io/managed-by", None)
+        deployment_with_pod_template["metadata"]["labels"].pop(
+            "app.kubernetes.io/managed-by", None
+        )
         with patch("app.CFG", mock_config):
             assert _object_matches_scope(deployment_with_pod_template) is False
 
-    def test_object_matches_scope_when_namespace_not_in_target_then_false(self, mock_config, deployment_with_pod_template):
+    def test_object_matches_scope_when_namespace_not_in_target_then_false(
+        self, mock_config, deployment_with_pod_template
+    ):
         mock_config.target_namespaces = ["other-ns"]
         mock_config.target_labels = {}
         mock_config.require_juju_managed = False

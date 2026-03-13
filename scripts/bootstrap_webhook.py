@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
-"""
-One-command deploy: generate webhook TLS certs and apply all manifests.
+"""One-command deploy: generate webhook TLS certs and apply all manifests.
 Calls gen_webhook_certs.generate() with parameters from CLI.
 
 Requires: openssl, kubectl in PATH. Run from project root.

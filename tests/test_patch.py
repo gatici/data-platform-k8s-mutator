@@ -8,15 +8,19 @@ import json
 from unittest.mock import patch
 
 import pytest
+from app import Patch, _admission_review_response, _encode_patch_base64
+from app import app as fastapi_app
 from fastapi.testclient import TestClient
-
-from app import Patch, _admission_review_response, _encode_patch_base64, app as fastapi_app
 
 
 class TestEncodePatchBase64:
     def test_encoded_patch_decodes_to_valid_jsonpatch(self):
         patches = [
-            Patch(op="add", path="/spec/template/spec/securityContext", value={"sysctls": [{"name": "net.ipv4.tcp_retries2", "value": "5"}]}),
+            Patch(
+                op="add",
+                path="/spec/template/spec/securityContext",
+                value={"sysctls": [{"name": "net.ipv4.tcp_retries2", "value": "5"}]},
+            ),
         ]
         encoded = _encode_patch_base64(patches)
         raw = base64.b64decode(encoded)
@@ -49,7 +53,9 @@ class TestMutateEndpoint:
     def client(self):
         return TestClient(fastapi_app)
 
-    def test_mutate_when_object_in_scope_then_returns_patch(self, client, admission_review_request, mock_config):
+    def test_mutate_when_object_in_scope_then_returns_patch(
+        self, client, admission_review_request, mock_config
+    ):
         with patch("app.CFG", mock_config):
             r = client.post("/mutate", json=admission_review_request)
         assert r.status_code == 200
@@ -58,7 +64,9 @@ class TestMutateEndpoint:
         assert "patch" in data["response"]
         assert data["response"]["patchType"] == "JSONPatch"
 
-    def test_mutate_when_object_out_of_scope_then_allowed_no_patch(self, client, admission_review_request, mock_config):
+    def test_mutate_when_object_out_of_scope_then_allowed_no_patch(
+        self, client, admission_review_request, mock_config
+    ):
         mock_config.require_juju_managed = True
         admission_review_request["request"]["object"]["metadata"]["labels"] = {}
         with patch("app.CFG", mock_config):

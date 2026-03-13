@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
-"""
-Generate CA and webhook server certificates and all Kubernetes manifests (namespace,
+"""Generate CA and webhook server certificates and all Kubernetes manifests (namespace,
 TLS Secret, MutatingWebhookConfiguration, Deployment, Service)
 
 Library only: call generate(config) with a GenWebhookCertsConfig. CLI is in bootstrap_webhook.

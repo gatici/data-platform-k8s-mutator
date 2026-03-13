@@ -4,7 +4,6 @@
 """Unit tests for helper functions (_is_true, _parse_label_selector)."""
 
 import pytest
-
 from app import _is_true, _parse_label_selector
 
 

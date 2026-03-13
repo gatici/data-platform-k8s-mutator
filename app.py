@@ -1,8 +1,7 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""
-Kubernetes mutating admission webhook that injects a sysctl into workload pod specs.
+"""Kubernetes mutating admission webhook that injects a sysctl into workload pod specs.
 
 On CREATE of a StatefulSet, Deployment, or DaemonSet, the webhook returns a JSONPatch to add or update
 spec.securityContext.sysctls (e.g. net.ipv4.tcp_retries2=5).
@@ -76,8 +75,7 @@ def _parse_label_selector(selector: str) -> dict[str, str]:
 
 
 class MutatorConfig(BaseSettings):
-    """
-    Webhook configuration loaded from environment variables.
+    """Webhook configuration loaded from environment variables.
     Used to decide which objects to mutate and which sysctl to inject.
     """
 

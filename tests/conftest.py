@@ -7,6 +7,7 @@
 # pydantic-settings parses list fields from env as JSON.
 
 import os
+
 os.environ.setdefault("TARGET_CONTAINER_NAMES", '["app"]')
 
 import pytest
@@ -15,6 +16,7 @@ import pytest
 @pytest.fixture
 def mock_config():
     """A minimal config-like object for patching app.CFG in scope/patch tests."""
+
     class Cfg:
         sysctl_name = "net.ipv4.tcp_retries2"
         sysctl_value = "5"

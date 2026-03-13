@@ -4,15 +4,16 @@
 """Unit tests for MutatorConfig (env-based settings)."""
 
 import pytest
-from pydantic import ValidationError
-
 from app import MutatorConfig
+from pydantic import ValidationError
 
 
 class TestMutatorConfig:
     def test_config_when_target_container_names_missing_then_raises(self, monkeypatch):
         monkeypatch.delenv("TARGET_CONTAINER_NAMES", raising=False)
-        with pytest.raises((ValueError, ValidationError), match="at least one container name|Field required"):
+        with pytest.raises(
+            (ValueError, ValidationError), match="at least one container name|Field required"
+        ):
             MutatorConfig()
 
     def test_target_container_names_parsed(self, monkeypatch):
@@ -35,7 +36,9 @@ class TestMutatorConfig:
     def test_target_labels_parsed(self, monkeypatch):
         monkeypatch.setenv("TARGET_CONTAINER_NAMES", '["app"]')
         # pydantic-settings parses dict fields from env as JSON
-        monkeypatch.setenv("TARGET_LABELS", '{"app.kubernetes.io/name": "myapp", "managed-by": "juju"}')
+        monkeypatch.setenv(
+            "TARGET_LABELS", '{"app.kubernetes.io/name": "myapp", "managed-by": "juju"}'
+        )
         cfg = MutatorConfig()
         assert cfg.target_labels == {
             "app.kubernetes.io/name": "myapp",
