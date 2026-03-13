@@ -5,7 +5,8 @@ base: ubuntu@24.04
 version: "1.0"
 summary: Product-agnostic mutating webhook for pod sysctls
 description: |
-  Mutating admission webhook that injects sysctls (e.g. net.ipv4.tcp_retries2) into
+  Mutating admission webhook that injects
+  sysctls (e.g. net.ipv4.tcp_retries2) into
   Kubernetes workloads at admission time.
 platforms:
   amd64:

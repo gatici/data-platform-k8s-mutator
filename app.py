@@ -5,8 +5,8 @@
 Kubernetes mutating admission webhook that injects a sysctl into workload pod specs.
 
 On CREATE of a StatefulSet, Deployment, or DaemonSet, the webhook returns a JSONPatch to add or update
-spec.securityContext.sysctls (e.g. net.ipv4.tcp_retries2=5). Scope and target
-containers are controlled via environment variables whicha are described in MutatorConfig.
+spec.securityContext.sysctls (e.g. net.ipv4.tcp_retries2=5).
+Scope and target containers are controlled via environment variables which are described in MutatorConfig.
 """
 
 import base64
@@ -14,7 +14,7 @@ import logging
 from typing import Any
 
 from fastapi import Body, FastAPI
-from pydantic import BaseModel, field_validator, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 app = FastAPI()
@@ -24,7 +24,7 @@ webhook = logging.getLogger(__name__)
 webhook.setLevel(logging.INFO)
 logging.basicConfig(format="[%(asctime)s] %(levelname)s: %(message)s")
 
-#-------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 # Helpers for config parsing
 
 
@@ -73,7 +73,6 @@ def _parse_label_selector(selector: str) -> dict[str, str]:
 
 # -----------------------------------------------------------------------------
 # Configuration (from environment)
-
 
 
 class MutatorConfig(BaseSettings):
@@ -190,7 +189,6 @@ CFG = MutatorConfig()
 # JSONPatch and AdmissionReview types
 
 
-
 class Patch(BaseModel):
     """Single JSONPatch operation (op, path, value)."""
 
@@ -249,7 +247,6 @@ def _get_pod_spec_and_prefix(k8s_object: dict[str, Any]) -> tuple[dict[str, Any]
 
 # -----------------------------------------------------------------------------
 # Scope and target matching
-
 
 
 def _object_labels_match_config(labels: dict[str, Any]) -> bool:
@@ -312,8 +309,10 @@ def _object_matches_scope(k8s_object: dict[str, Any]) -> bool:
     # namespace scope, object must be in one of the configured namespaces (if namespace given)
     if CFG.target_namespaces and namespace not in CFG.target_namespaces:
         return False
+    # labels scope, object must have all the configured labels with the configured values
     if not _object_labels_match_config(labels):
         return False
+    # managed-by scope, object must be managed by juju (if require_juju_managed is True)
     if CFG.require_juju_managed and labels.get("app.kubernetes.io/managed-by") != "juju":
         return False
 
@@ -321,12 +320,12 @@ def _object_matches_scope(k8s_object: dict[str, Any]) -> bool:
     if not pod_spec_info:
         return False
     pod_spec, _ = pod_spec_info
+    # container scope, pod spec must have at least one container that matches the configured container names and image substring
     return _pod_spec_has_matching_container(pod_spec)
 
 
 # -----------------------------------------------------------------------------
 # Building the sysctl JSONPatch
-
 
 
 def _build_sysctl_patch_ops(k8s_object: dict[str, Any]) -> list[Patch]:
@@ -346,13 +345,13 @@ def _build_sysctl_patch_ops(k8s_object: dict[str, Any]) -> list[Patch]:
     entry = {"name": CFG.sysctl_name, "value": str(CFG.sysctl_value)}
     security_context = pod_spec.get("securityContext")
 
-    # no securityContext: add one with our sysctl
+    # no securityContext: add securityContext with our sysctl
     if security_context is None:
         return [
             Patch(op="add", path=f"{prefix}/securityContext", value={"sysctls": [entry]}),
         ]
 
-    # securityContext exists but no sysctls list: add it
+    # securityContext exists but no sysctls list: add sysctls list with our sysctl
     if security_context.get("sysctls") is None:
         return [
             Patch(op="add", path=f"{prefix}/securityContext/sysctls", value=[entry]),
@@ -374,7 +373,8 @@ def _build_sysctl_patch_ops(k8s_object: dict[str, Any]) -> list[Patch]:
             ),
         ]
 
-    # our sysctl not in list: append it
+    # sysctl exists but the key that we are interested in is not in the list
+    # /securityContext/sysctls/- means appends to the end of the list
     return [
         Patch(op="add", path=f"{prefix}/securityContext/sysctls/-", value=entry),
     ]
@@ -382,7 +382,6 @@ def _build_sysctl_patch_ops(k8s_object: dict[str, Any]) -> list[Patch]:
 
 # -----------------------------------------------------------------------------
 # AdmissionReview response helper
-
 
 
 def _admission_review_response(
@@ -437,16 +436,18 @@ def mutate_admission_review(admission_review_body: dict = Body(...)) -> dict[str
     # extract the admission request: UID and the object being created
     request = admission_review_body.get("request") or {}
     uid = request.get("uid", "")
-    obj = request.get("object") or {}
-    name = (obj.get("metadata") or {}).get("name") or "unknown"
+    obj = request.get("object")  # missing or non-dict is malformed
+    name = (
+        (obj.get("metadata") or {}).get("name") or "unknown"
+        if isinstance(obj, dict)
+        else "unknown"
+    )
 
     webhook.info("mutate called for %s", name)
 
     # malformed request: we just skip our patch.
-    if not uid or not isinstance(obj, dict):
-        return _admission_review_response(
-            uid or "unknown", "malformed admission request.", []
-        )
+    if not uid or obj is None or not isinstance(obj, dict):
+        return _admission_review_response(uid or "unknown", "malformed admission request.", [])
 
     # Only mutate if object matches scope (namespace, labels, managed-by, container match).
     if not _object_matches_scope(obj):

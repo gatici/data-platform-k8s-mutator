@@ -12,6 +12,60 @@ By default it ensures:
 This is useful for workloads that require `tcp_retries2` to be lowered in the pod network namespace
 without patching pods after creation. It can be used for any workload easily.
 
+## Prerequisites
+
+To run this webhook successfully you must enable/configure these 3 items in the cluster.
+
+### 1. TLS and CA bundle
+
+The API server calls the webhook over HTTPS and verifies the webhook's server certificate using the CA bundle in `MutatingWebhookConfiguration.clientConfig.caBundle`.
+
+**Recommended (automated in this repo):** Use the built-in scripts so no cert-manager or manual steps are needed:
+
+- **`scripts/gen_webhook_certs.py`** – generates a CA and server cert (OpenSSL), TLS Secret, MutatingWebhookConfiguration (caBundle) and Deployment + Service and writes under `deploy/` directory by default.
+- **`scripts/bootstrap_webhook.py`** – runs the generator then `kubectl apply -f deploy/` for a one-command deploy.
+
+See **Quick start** below. No Python TLS libraries required (script uses OpenSSL).
+
+### 2. Admission webhooks on the API server
+
+- The `MutatingAdmissionWebhook` admission plugin must be enabled on the API server (usually enabled by default).
+- The API server must be able to reach the webhook service. The network policies/firewalls must allow it.
+- The webhook must serve HTTPS and the `MutatingWebhookConfiguration` must contain a trusted CA bundle.
+
+Check that admission registration is available (works on any cluster where `kubectl` is configured):
+
+```bash
+kubectl api-versions | grep admissionregistration
+```
+
+You should see `admissionregistration.k8s.io/v1` (and possibly `v1beta1`). If admission webhooks are disabled for your distribution, enable the `MutatingAdmissionWebhook` admission plugin via your cluster's API server configuration and restart the API server. The exact steps depend on your Kubernetes distribution (e.g. kubeadm, managed clusters, or distro-specific config files).
+
+### 3. Kubelet: allow the unsafe sysctl
+
+This webhook only adds the sysctl to the Pod spec. Nodes will still reject pods using unsafe sysctls unless kubelet is configured to allow them.
+
+Configure kubelet with `--allowed-unsafe-sysctls=net.ipv4.tcp_retries2` (e.g. in a kubelet config file). Restart the kubelet so the change takes effect.
+
+## Dependencies
+
+Dependencies are managed with [uv](https://docs.astral.sh/uv/) and `pyproject.toml`. From the project root:
+
+```bash
+# Install production dependencies
+uv sync
+
+# Install with dev dependencies (e.g. pytest)
+uv sync --extra dev
+```
+
+Run the webhook scripts or tests in the uv environment:
+
+```bash
+uv run python -m scripts.bootstrap_webhook --help
+uv run pytest tests/ -v
+```
+
 ## Quick start
 
 One command generates everything: TLS certs, namespace, TLS Secret, Deployment, Service, and MutatingWebhookConfiguration (with caBundle). 
@@ -38,7 +92,7 @@ The app requires `TARGET_CONTAINER_NAMES` to be non-empty. use `--target-contain
 ```bash
 # Use the image tag you pushed (e.g. localhost:32000/data-platform-k8s-mutator:1.3). Run from project root:
 # pass the image and which containers to match (required for the webhook to start)
-python -m scripts.bootstrap_webhook --image localhost:32000/data-platform-k8s-mutator:1.0 \
+uv run python -m scripts.bootstrap_webhook --image localhost:32000/data-platform-k8s-mutator:1.0 \
   --target-container-names targetapp \
   --target-image-substr targetimage \
   --target-labels app.kubernetes.io/managed-by=juju
@@ -55,7 +109,7 @@ To only generate manifests use --dry-run option:
 
 ```bash
 
-python -m scripts.bootstrap_webhook --dry-run --image localhost:32000/data-platform-k8s-mutator:1.0 \
+uv run python -m scripts.bootstrap_webhook --dry-run --image localhost:32000/data-platform-k8s-mutator:1.0 \
   --target-container-names targetapp \
   --target-image-substr targetimage \
   --target-labels app.kubernetes.io/managed-by=juju
@@ -67,42 +121,50 @@ After generating manifests, deploy Admission Webhook Mutator:
 kubectl apply -f deploy/
 ```
 
-## Operational guideline (3 prerequisites)
+## High availability (HA)
 
-To run this webhook successfully you must enable/configure these 3 items in the cluster.
+By default the webhook runs with a single replica. For HA, run multiple replicas so the API server can still reach the webhook if a pod fails or is rescheduled. The Service load-balances across pods.
 
-### 1. TLS and CA bundle
-
-The API server calls the webhook over HTTPS and verifies the webhook's server certificate using the CA bundle in `MutatingWebhookConfiguration.clientConfig.caBundle`.
-
-**Recommended (automated in this repo):** Use the built-in scripts so no cert-manager or manual steps are needed:
-
-- **`scripts/gen_webhook_certs.py`** – generates a CA and server cert (OpenSSL), TLS Secret, MutatingWebhookConfiguration (caBundle) and Deployment + Service and writes under `deploy/` directory by default.
-- **`scripts/bootstrap_webhook.py`** – runs the generator then `kubectl apply -f deploy/` for a one-command deploy.
-
-See **Quick start** above. No Python TLS libraries required (script uses OpenSSL).
-
-### 2. Admission webhooks on the API server
-
-- The `MutatingAdmissionWebhook` admission plugin must be enabled on the API server (usually enabled by default).
-- The API server must be able to reach the webhook service. The network policies/firewalls must allow it.
-- The webhook must serve HTTPS and the `MutatingWebhookConfiguration` must contain a trusted CA bundle.
-
-Check that admission registration is available (works on any cluster where `kubectl` is configured):
+**1. Scale the webhook Deployment** (after deploy):
 
 ```bash
-kubectl api-versions | grep admissionregistration
+kubectl scale deployment sysctl-webhook -n webhooks --replicas=3
 ```
 
-You should see `admissionregistration.k8s.io/v1` (and possibly `v1beta1`). If admission webhooks are disabled for your distribution, enable the `MutatingAdmissionWebhook` admission plugin via your cluster's API server configuration and restart the API server. 
-The exact steps depend on your Kubernetes distribution (e.g. kubeadm, managed clusters, or distro-specific config files).
+Or edit the generated `deploy/workload.yaml` before applying: set `spec.replicas` to `3` (or more) for the webhook Deployment.
 
-### 3. Kubelet: allow the unsafe sysctl
+**2. (Optional) PodDisruptionBudget** – avoid all replicas being evicted at once during node drains:
 
-This webhook only adds the sysctl to the Pod spec. Nodes will still reject pods using unsafe sysctls unless kubelet is configured to allow them.
+```bash
+kubectl apply -f - <<EOF
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sysctl-webhook-pdb
+  namespace: webhooks
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: sysctl-webhook
+EOF
+```
 
-Configure kubelet with `--allowed-unsafe-sysctls=net.ipv4.tcp_retries2` (e.g. in a kubelet config file). 
-Restart the kubelet so the change takes effect.
+**3. (Optional) Spread replicas across nodes** – add to the webhook Deployment’s `spec.template.spec`:
+
+```yaml
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app: sysctl-webhook
+          topologyKey: kubernetes.io/hostname
+```
+
+This prefers placing pods on different nodes. For stricter spread across zones, use `topologyKey: topology.kubernetes.io/zone` and/or `requiredDuringSchedulingIgnoredDuringExecution`.
 
 ## Configuration (environment variables)
 
@@ -127,6 +189,6 @@ Sysctls are applied by the kubelet at pod creation time. So it will not change s
 
 ## Manifests
 
-- **`scripts/bootstrap_webhook`** (single entry point): parses all CLI options, calls gen_webhook_certs.generate() to produce CA, server cert, and manifests in deploy/, then runs kubectl apply -f deploy/ unless --dry-run. Run from project root: python -m scripts.bootstrap_webhook.
+- **`scripts/bootstrap_webhook`** (single entry point): parses all CLI options, calls gen_webhook_certs.generate() to produce CA, server cert, and manifests in deploy/, then runs kubectl apply -f deploy/ unless --dry-run. Run from project root: `uv run python -m scripts.bootstrap_webhook`.
 - **`scripts/gen_webhook_certs`**: library only: provides GenWebhookCertsConfig and generate(config) used by bootstrap.
 

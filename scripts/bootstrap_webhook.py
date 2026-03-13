@@ -3,7 +3,7 @@
 # See LICENSE file for licensing details.
 """
 One-command deploy: generate webhook TLS certs and apply all manifests.
-Calls gen_webhook_certs.generate() with parameters from CLI (no subprocess).
+Calls gen_webhook_certs.generate() with parameters from CLI.
 
 Requires: openssl, kubectl in PATH. Run from project root.
 
@@ -33,8 +33,9 @@ def main() -> int:
     parser.add_argument("--service", default="sysctl-webhook", help="Deployment/Service name")
     parser.add_argument("--secret-name", default="sysctl-webhook-tls", help="TLS Secret name")
     parser.add_argument("--webhook-config-name", default="sysctl-webhook", help="MutatingWebhookConfiguration name")
-    parser.add_argument("--validity-days", type=int, default=3650, help="Certificate validity in days")
+    parser.add_argument("--validity-days", type=int, default=3650, help="Certificate validity in days, by default 10 years")
     parser.add_argument("--image", default="sysctl-webhook:latest", help="Container image for the webhook")
+    parser.add_argument("--target-namespaces", default="", help="TARGET_NAMESPACES env, comma-separated namespaces to mutate (empty = any)")
     parser.add_argument("--target-container-names", default="", help="TARGET_CONTAINER_NAMES env (required by app)")
     parser.add_argument("--target-image-substr", default="", help="TARGET_IMAGE_SUBSTR env; empty = any image")
     parser.add_argument("--target-labels", default="", help="TARGET_LABELS env")
@@ -52,6 +53,7 @@ def main() -> int:
         webhook_config_name=args.webhook_config_name,
         validity_days=args.validity_days,
         image=args.image,
+        target_namespaces=args.target_namespaces,
         target_container_names=args.target_container_names,
         target_image_substr=args.target_image_substr,
         target_labels=args.target_labels,
