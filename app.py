@@ -1,323 +1,472 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
+"""
+Kubernetes mutating admission webhook that injects a sysctl into workload pod specs.
+
+On CREATE of a StatefulSet, Deployment, or DaemonSet, the webhook returns a JSONPatch to add or update
+spec.securityContext.sysctls (e.g. net.ipv4.tcp_retries2=5). Scope and target
+containers are controlled via environment variables whicha are described in MutatorConfig.
+"""
+
 import base64
 import logging
-import os
 from typing import Any
 
 from fastapi import Body, FastAPI
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, field_validator, TypeAdapter
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 app = FastAPI()
+
 
 webhook = logging.getLogger(__name__)
 webhook.setLevel(logging.INFO)
 logging.basicConfig(format="[%(asctime)s] %(levelname)s: %(message)s")
 
-
-def _is_true(v: str | None, default: bool = False) -> bool:
-    if v is None:
-        return default
-    return v.strip().lower() in ("1", "true", "yes", "y", "on")
+#-------------------------------------------------------------------------
+# Helpers for config parsing
 
 
-def _env(name: str, default: str = "") -> str:
-    return (os.getenv(name, default) or "").strip()
+def _is_true(value: str | None, default: bool = False) -> bool:
+    """Parse a string as boolean (e.g. from env).
 
+    Args:
+        value: String to interpret (e.g. "true", "1", "yes"); may be None.
+        default: Value to return when value is None.
 
-def _env_required(name: str, *, allow_empty: bool = False) -> str:
-    """Return env var value, but fail if it is not present.
-
-    `allow_empty=True` allows the variable to be set to an empty string (e.g. to mean "match any").
+    Returns:
+        True if value is truthy, False otherwise; default when value is None.
     """
-    if name not in os.environ:
-        raise ValueError(f"Missing required environment variable: {name}")
-    value = _env(name, "")
-    if not allow_empty and not value:
-        raise ValueError(f"Environment variable {name} must be non-empty")
-    return value
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "y", "on")
 
 
 def _parse_label_selector(selector: str) -> dict[str, str]:
+    """Parse comma-separated key=value pairs into a dict.
+
+    Args:
+        selector: Comma-separated key=value string (e.g. "k1=v1,k2=v2").
+
+    Returns:
+        Dict mapping label keys to values. Empty if selector is empty/whitespace.
+
+    Raises:
+        ValueError: If an entry has no "=" or has an empty key.
+    """
     labels: dict[str, str] = {}
-    selector = selector.strip()
-    if not selector:
-        return labels
-    for entry in selector.split(","):
+    for entry in (selector or "").strip().split(","):
         entry = entry.strip()
         if not entry:
             continue
         if "=" not in entry:
-            raise ValueError(f"Invalid label selector entry (expected key=value): {entry!r}")
-        label_key, label_value = entry.split("=", 1)
-        label_key, label_value = label_key.strip(), label_value.strip()
-        if not label_key:
-            raise ValueError(f"Invalid label selector entry (empty key): {entry!r}")
-        labels[label_key] = label_value
+            raise ValueError(f"Invalid label selector (expected key=value): {entry!r}")
+        # partition("=") splits on first "=" only; _ is the "=" itself (unused)
+        key, _, val = entry.partition("=")
+        key, val = key.strip(), val.strip()
+        if not key:
+            raise ValueError(f"Invalid label selector (empty key): {entry!r}")
+        labels[key] = val
     return labels
 
 
-class MutatorConfig(BaseModel):
-    """Configuration loaded from environment variables."""
+# -----------------------------------------------------------------------------
+# Configuration (from environment)
 
-    # Sysctl injection
+
+
+class MutatorConfig(BaseSettings):
+    """
+    Webhook configuration loaded from environment variables.
+    Used to decide which objects to mutate and which sysctl to inject.
+    """
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+    # Sysctl to inject into pod securityContext.sysctls
     sysctl_name: str = "net.ipv4.tcp_retries2"
     sysctl_value: str = "5"
 
-    # Optional namespace scope + label selection
-    target_namespace: str = ""
-    target_labels: dict[str, str] = {}
-    require_labels: dict[str, str] = {}
-
-    # Container/image matching
+    # Required: comma-separated container names to target (only these containers are checked)
     target_container_names: list[str]
-    target_image_substr: str
 
-    # Check if the object is managed by Juju
+    # Optional: only mutate objects in these namespaces (comma-separated); empty = any namespace
+    target_namespaces: list[str] = []
+    # Optional: only mutate objects that have these labels; if not set, applied to any object.
+    target_labels: dict[str, str] = {}
+    # Optional: only match containers whose image contains this substring, if not set, it will be applied to containers with any image.
+    target_image_substr: str = ""
+
+    # If True, only mutate objects with label app.kubernetes.io/managed-by=juju
     require_juju_managed: bool = True
 
+    @field_validator("target_namespaces", mode="before")
     @classmethod
-    def from_env(cls) -> "MutatorConfig":
-        sysctl_name = _env("SYSCTL_NAME", cls.sysctl_name)
-        sysctl_value = _env("SYSCTL_VALUE", cls.sysctl_value)
+    def _parse_target_namespaces(cls, v: object) -> list[str]:
+        """Parse comma-separated namespace names from env into a list.
 
-        target_namespace = _env("TARGET_NAMESPACE", "")
-        target_labels = _parse_label_selector(_env("TARGET_LABELS", ""))
-        require_labels = _parse_label_selector(_env("REQUIRE_LABELS", ""))
+        Args:
+            v: Raw value (list or comma-separated string from env).
 
-        require_juju_managed = _is_true(
-            os.getenv("REQUIRE_JUJU_MANAGED"),
-            default=cls.require_juju_managed,
-        )
+        Returns:
+            List of stripped namespace names, empty if v is empty/whitespace.
+        """
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        raw = (v or "").strip()
+        return [n.strip() for n in raw.split(",") if n.strip()]
 
-        # allow empty string to mean "match any image"
-        target_image_substr = _env_required("TARGET_IMAGE_SUBSTR", allow_empty=True)
+    @field_validator("target_labels", mode="before")
+    @classmethod
+    def _parse_label_selector_field(cls, v: object) -> dict[str, str]:
+        """Parse raw env value for target_labels into a label dict.
 
-        raw_container_names = _env_required("TARGET_CONTAINER_NAMES", allow_empty=False)
-        target_container_names = [n.strip() for n in raw_container_names.split(",") if n.strip()]
-        if not target_container_names:
-            raise ValueError("TARGET_CONTAINER_NAMES did not contain any valid container names")
+        Args:
+            v: Raw value (dict or comma-separated key=value string from env).
 
-        return cls(
-            sysctl_name=sysctl_name,
-            sysctl_value=sysctl_value,
-            target_namespace=target_namespace,
-            target_labels=target_labels,
-            require_labels=require_labels,
-            target_container_names=target_container_names,
-            target_image_substr=target_image_substr,
-            require_juju_managed=require_juju_managed,
-        )
+        Returns:
+            Dict of label key -> value; empty if v is empty/whitespace.
+        """
+        if isinstance(v, dict):
+            return v
+        return _parse_label_selector((v or "").strip())
+
+    @field_validator("require_juju_managed", mode="before")
+    @classmethod
+    def _parse_require_juju_managed(cls, v: object) -> bool:
+        """Parse raw env value for require_juju_managed into a bool.
+
+        Args:
+            v: Raw value (bool or string from env).
+
+        Returns:
+            True for truthy strings (e.g. "1", "true"), False otherwise; default True if None.
+        """
+        if isinstance(v, bool):
+            return v
+        return _is_true(v, default=True)
+
+    @field_validator("target_container_names", mode="before")
+    @classmethod
+    def _parse_target_container_names(cls, v: object) -> list[str]:
+        """Parse comma-separated container names from env into a list.
+
+        Args:
+            v: Raw value (list or comma-separated string from env).
+
+        Returns:
+            Non-empty list of stripped container names.
+
+        Raises:
+            ValueError: If no valid container names are present.
+        """
+        if isinstance(v, list):
+            return v
+        raw = (v or "").strip()
+        names = [n.strip() for n in raw.split(",") if n.strip()]
+        if not names:
+            raise ValueError("TARGET_CONTAINER_NAMES must contain at least one container name")
+        return names
+
+    @field_validator("target_image_substr", mode="before")
+    @classmethod
+    def _strip_target_image_substr(cls, v: object) -> str:
+        """Strip whitespace from target_image_substr env value.
+
+        Args:
+            v: Raw value (string or None from env).
+
+        Returns:
+            Stripped string, or empty string if v is None.
+        """
+        return (v or "").strip() if v is not None else ""
 
 
-CFG = MutatorConfig.from_env()
+CFG = MutatorConfig()
+
+
+# -----------------------------------------------------------------------------
+# JSONPatch and AdmissionReview types
+
 
 
 class Patch(BaseModel):
+    """Single JSONPatch operation (op, path, value)."""
+
     op: str
     path: str
     value: Any | None = None
 
 
-ADAPTER = TypeAdapter(list[Patch])
+def _encode_patch_base64(patches: list[Patch]) -> str:
+    """Serialize patch list to JSON and base64-encode for AdmissionResponse.patch.
+
+    Args:
+        patches: List of JSONPatch operations to encode.
+
+    Returns:
+        Base64-encoded JSON string suitable for AdmissionResponse.patch.
+    """
+    return base64.b64encode(TypeAdapter(list[Patch]).dump_json(patches)).decode()
 
 
-def _b64_patch(patch_operations: list[Patch]) -> str:
-    return base64.b64encode(ADAPTER.dump_json(patch_operations)).decode()
+# -----------------------------------------------------------------------------
+# Locating the pod spec in different workload types
+
+
+# JSONPatch path prefix for workloads that use spec.template.spec
+_POD_TEMPLATE_SPEC_PREFIX = "/spec/template/spec"
 
 
 def _get_pod_spec_and_prefix(k8s_object: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
-    """Return (pod_spec, jsonpatch_prefix) for supported objects.
+    """Find the pod spec inside the object and the JSONPatch path prefix to it.
 
-    - Pod: prefix "/spec"
-    - Workloads with pod template: prefix "/spec/template/spec"
-    - CronJob: prefix "/spec/jobTemplate/spec/template/spec"
+    Supported kinds: StatefulSet, Deployment, DaemonSet, ReplicaSet, Job
+    (all have spec.template.spec).
+
+    Args:
+        k8s_object: Full Kubernetes object (e.g Deployment) as a dict.
+
+    Returns:
+        (pod_spec, jsonpatch_prefix) for the pod template spec, or None if
+        the object has no spec.template.spec.
     """
-    object_kind = (k8s_object.get("kind") or "").lower()
-    object_spec = k8s_object.get("spec") or {}
+    spec = k8s_object.get("spec") or {}
+    if not isinstance(spec, dict):
+        return None
 
-    if object_kind == "pod":
-        pod_spec = object_spec if isinstance(object_spec, dict) else {}
-        return (pod_spec, "/spec")
+    template = spec.get("template")
+    if not isinstance(template, dict):
+        return None
 
-    # CronJob spec.jobTemplate.spec.template.spec
-    if (
-        object_kind == "cronjob"
-        and isinstance(object_spec, dict)
-        and isinstance(object_spec.get("jobTemplate"), dict)
-    ):
-        job_template = object_spec.get("jobTemplate") or {}
-        job_template_spec = job_template.get("spec") or {}
-        if isinstance(job_template_spec, dict) and isinstance(
-            job_template_spec.get("template"), dict
-        ):
-            pod_template = job_template_spec.get("template") or {}
-            pod_spec = pod_template.get("spec") or {}
-            if isinstance(pod_spec, dict):
-                return (pod_spec, "/spec/jobTemplate/spec/template/spec")
+    pod_spec = template.get("spec")
+    if not isinstance(pod_spec, dict):
+        return None
 
-    # StatefulSet/Deployment/DaemonSet/ReplicaSet/Job/ etc.
-    if isinstance(object_spec, dict) and isinstance(object_spec.get("template"), dict):
-        pod_template = object_spec.get("template") or {}
-        pod_spec = pod_template.get("spec") or {}
-        if isinstance(pod_spec, dict):
-            return (pod_spec, "/spec/template/spec")
-
-    if isinstance(object_spec, dict) and isinstance(object_spec.get("containers"), list):
-        return (object_spec, "/spec")
-
-    return None
+    return (pod_spec, _POD_TEMPLATE_SPEC_PREFIX)
 
 
-def _pod_spec_matches_target(pod_spec: dict[str, Any]) -> bool:
-    container_specs = pod_spec.get("containers") or []
-    for container_spec in container_specs:
-        if not isinstance(container_spec, dict):
-            continue
-        container_name = container_spec.get("name") or ""
-        if CFG.target_container_names and container_name not in CFG.target_container_names:
-            continue
-        container_image = container_spec.get("image", "")
-        if CFG.target_image_substr:
-            if not (
-                isinstance(container_image, str) and CFG.target_image_substr in container_image
-            ):
-                continue
-        return True
-    return False
+# -----------------------------------------------------------------------------
+# Scope and target matching
 
 
-def _labels_match(labels: dict[str, Any]) -> bool:
+
+def _object_labels_match_config(labels: dict[str, Any]) -> bool:
+    """Check whether object labels satisfy target_labels.
+
+    Args:
+        labels: Object metadata.labels (or empty dict).
+
+    Returns:
+        True if every target label is present with the configured value
+        (or target_labels is empty); False otherwise.
+    """
     if not CFG.target_labels:
         return True
-    for label_key, label_value in CFG.target_labels.items():
-        if labels.get(label_key) != label_value:
+    for key, want in CFG.target_labels.items():
+        if labels.get(key) != want:
             return False
     return True
 
 
+def _pod_spec_has_matching_container(pod_spec: dict[str, Any]) -> bool:
+    """Check if at least one container matches target names and image substring.
+
+    Args:
+        pod_spec: Pod spec dict (e.g. spec.template.spec) with a "containers" list.
+
+    Returns:
+        True if any container matches CFG.target_container_names (if set) and
+        CFG.target_image_substr (if set), False otherwise.
+    """
+    for container in pod_spec.get("containers") or []:
+        if not isinstance(container, dict):
+            continue
+        name = container.get("name") or ""
+        if CFG.target_container_names and name not in CFG.target_container_names:
+            continue
+        image = container.get("image", "")
+        if CFG.target_image_substr and (
+            not isinstance(image, str) or CFG.target_image_substr not in image
+        ):
+            continue
+        return True
+    return False
+
+
 def _object_matches_scope(k8s_object: dict[str, Any]) -> bool:
+    """Determine whether the object is in scope for mutation.
+
+    Args:
+        k8s_object: full Kubernetes object as a dict.
+
+    Returns:
+        True if namespace (when target_namespaces is set), labels, managed-by,
+        kind and at least one container match the configured scope, False otherwise.
+    """
     metadata = k8s_object.get("metadata") or {}
-    object_labels = metadata.get("labels") or {}
-    object_namespace = metadata.get("namespace") or ""
+    labels = metadata.get("labels") or {}
+    namespace = metadata.get("namespace") or ""
 
-    if CFG.target_namespace and object_namespace != CFG.target_namespace:
+    # namespace scope, object must be in one of the configured namespaces (if namespace given)
+    if CFG.target_namespaces and namespace not in CFG.target_namespaces:
         return False
-
-    if not _labels_match(object_labels):
+    if not _object_labels_match_config(labels):
         return False
-
-    for label_key, label_value in CFG.require_labels.items():
-        if object_labels.get(label_key) != label_value:
-            return False
-
-    if CFG.require_juju_managed and object_labels.get("app.kubernetes.io/managed-by") != "juju":
+    if CFG.require_juju_managed and labels.get("app.kubernetes.io/managed-by") != "juju":
         return False
 
     pod_spec_info = _get_pod_spec_and_prefix(k8s_object)
     if not pod_spec_info:
         return False
     pod_spec, _ = pod_spec_info
-    return _pod_spec_matches_target(pod_spec)
+    return _pod_spec_has_matching_container(pod_spec)
+
+
+# -----------------------------------------------------------------------------
+# Building the sysctl JSONPatch
+
 
 
 def _build_sysctl_patch_ops(k8s_object: dict[str, Any]) -> list[Patch]:
+    """Build JSONPatch operations to inject or update the configured sysctl.
+
+    Args:
+        k8s_object: full Kubernetes workload object with spec.template.spec.
+
+    Returns:
+        list of patch ops (add/replace) to apply
+    """
     pod_spec_info = _get_pod_spec_and_prefix(k8s_object)
     if not pod_spec_info:
         return []
 
-    pod_spec, jsonpatch_prefix = pod_spec_info
+    pod_spec, prefix = pod_spec_info
+    entry = {"name": CFG.sysctl_name, "value": str(CFG.sysctl_value)}
     security_context = pod_spec.get("securityContext")
-    desired_sysctl = {"name": CFG.sysctl_name, "value": str(CFG.sysctl_value)}
 
-    # no securityContext -> add it
+    # no securityContext: add one with our sysctl
     if security_context is None:
         return [
-            Patch(
-                op="add",
-                path=f"{jsonpatch_prefix}/securityContext",
-                value={"sysctls": [desired_sysctl]},
-            )
+            Patch(op="add", path=f"{prefix}/securityContext", value={"sysctls": [entry]}),
         ]
 
-    # securityContext exists but no sysctls -> add sysctls list
-    if "sysctls" not in security_context or security_context.get("sysctls") is None:
+    # securityContext exists but no sysctls list: add it
+    if security_context.get("sysctls") is None:
         return [
-            Patch(
-                op="add",
-                path=f"{jsonpatch_prefix}/securityContext/sysctls",
-                value=[desired_sysctl],
-            )
+            Patch(op="add", path=f"{prefix}/securityContext/sysctls", value=[entry]),
         ]
 
-    # sysctls exists -> replace if present with a different value
-    existing_sysctls = security_context.get("sysctls") or []
-    for sysctl_index, sysctl_entry in enumerate(existing_sysctls):
-        if not isinstance(sysctl_entry, dict):
+    # sysctls exists: check if our sysctl is already there with same value
+    sysctls = security_context.get("sysctls") or []
+    for i, item in enumerate(sysctls):
+        if not isinstance(item, dict) or item.get("name") != CFG.sysctl_name:
             continue
-        if sysctl_entry.get("name") != CFG.sysctl_name:
-            continue
-        if str(sysctl_entry.get("value")) == str(CFG.sysctl_value):
+        # already set, no patch
+        if str(item.get("value")) == str(CFG.sysctl_value):
             return []
         return [
             Patch(
                 op="replace",
-                path=f"{jsonpatch_prefix}/securityContext/sysctls/{sysctl_index}/value",
+                path=f"{prefix}/securityContext/sysctls/{i}/value",
                 value=str(CFG.sysctl_value),
-            )
+            ),
         ]
 
+    # our sysctl not in list: append it
     return [
-        Patch(
-            op="add",
-            path=f"{jsonpatch_prefix}/securityContext/sysctls/-",
-            value=desired_sysctl,
-        )
+        Patch(op="add", path=f"{prefix}/securityContext/sysctls/-", value=entry),
     ]
 
 
-def admission_review(uid: str, message: str, patch_operations: list[Patch]) -> dict[str, Any]:
-    admission_response: dict[str, Any] = {
+# -----------------------------------------------------------------------------
+# AdmissionReview response helper
+
+
+
+def _admission_review_response(
+    uid: str,
+    message: str,
+    patch_operations: list[Patch],
+) -> dict[str, Any]:
+    """Build an AdmissionReview response (allowed=True, optional JSONPatch).
+
+    Args:
+        uid: Request UID from the admission request.
+        message: Status message for the response.
+        patch_operations: optional list of JSONPatch operations
+
+    Returns:
+        AdmissionReview dict with apiVersion, kind and response
+    """
+    response: dict[str, Any] = {
         "uid": uid,
         "allowed": True,
         "status": {"message": message},
     }
     if patch_operations:
-        admission_response["patchType"] = "JSONPatch"
-        admission_response["patch"] = _b64_patch(patch_operations)
+        response["patchType"] = "JSONPatch"
+        response["patch"] = _encode_patch_base64(patch_operations)
     return {
         "apiVersion": "admission.k8s.io/v1",
         "kind": "AdmissionReview",
-        "response": admission_response,
+        "response": response,
     }
 
 
+# -----------------------------------------------------------------------------
+# Webhook HTTP endpoint
+
+
 @app.post("/mutate")
-def mutate_admission_review(admission_review_body: dict = Body(...)):
-    admission_request = admission_review_body.get("request") or {}
-    request_uid = admission_request.get("uid", "")
-    k8s_object = admission_request.get("object") or {}
-    object_name = (k8s_object.get("metadata") or {}).get("name") or "unknown"
-    webhook.info("mutate called for %s", object_name)
-    if not request_uid or not isinstance(k8s_object, dict):
-        return admission_review(
-            request_uid or "unknown", "Malformed admission request; allowing.", []
+def mutate_admission_review(admission_review_body: dict = Body(...)) -> dict[str, Any]:
+    """Mutating webhook endpoint: inject sysctl into in-scope workloads.
+
+    Receives an AdmissionReview request, checks scope, and returns an
+    AdmissionReview response with optional JSONPatch. Always allows the
+    request, on scope mismatch or error, allows without mutation.
+
+    Args:
+        admission_review_body: full AdmissionReview body with request.object
+
+    Returns:
+        AdmissionReview dict with response.allowed=True and optional
+        response.patch (base64-encoded JSONPatch).
+    """
+    # extract the admission request: UID and the object being created
+    request = admission_review_body.get("request") or {}
+    uid = request.get("uid", "")
+    obj = request.get("object") or {}
+    name = (obj.get("metadata") or {}).get("name") or "unknown"
+
+    webhook.info("mutate called for %s", name)
+
+    # malformed request: we just skip our patch.
+    if not uid or not isinstance(obj, dict):
+        return _admission_review_response(
+            uid or "unknown", "malformed admission request.", []
         )
 
-    if not _object_matches_scope(k8s_object):
-        return admission_review(request_uid, "Object out of scope; allowing without mutation.", [])
+    # Only mutate if object matches scope (namespace, labels, managed-by, container match).
+    if not _object_matches_scope(obj):
+        return _admission_review_response(
+            uid, "Object out of scope; allowing without mutation.", []
+        )
 
+    # build JSONPatch to add/update sysctl in pod spec, on error, allow without mutation.
     try:
-        patch_operations = _build_sysctl_patch_ops(k8s_object)
+        patches = _build_sysctl_patch_ops(obj)
     except Exception as e:
         webhook.exception("Failed building sysctl patch: %s", e)
-        return admission_review(
-            request_uid, "Failed to build patch; allowing without mutation.", []
+        return _admission_review_response(
+            uid, "Failed to build patch; allowing without mutation.", []
         )
 
-    if patch_operations:
-        webhook.info("Injecting pod sysctl %s=%s via JSONPatch", CFG.sysctl_name, CFG.sysctl_value)
-        return admission_review(request_uid, "Injected pod sysctl.", patch_operations)
+    # return response with patch if we have changes, otherwise object already has the sysctl.
+    if patches:
+        webhook.info("Injecting sysctl %s=%s via JSONPatch", CFG.sysctl_name, CFG.sysctl_value)
+        return _admission_review_response(uid, "Injected pod sysctl.", patches)
 
-    return admission_review(request_uid, "Sysctl already set; no mutation.", [])
+    # Pod spec already has the configured sysctl with the correct value, no patch.
+    return _admission_review_response(uid, "Sysctl already set; no mutation.", [])

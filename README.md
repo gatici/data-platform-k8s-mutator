@@ -3,33 +3,84 @@
 This mutating admission webhook injects a pod sysctl into Kubernetes objects at admission time by
 returning a JSONPatch that adds/updates `spec.securityContext.sysctls` in the embedded Pod spec.
 
-It can target:
-- Pod objects (/spec)
-- controllers with a pod template (/spec/template/spec) such as StatefulSet, Deployment, DaemonSet, Job, etc.
-- CronJob pod templates (/spec/jobTemplate/spec/template/spec)
+It targets controllers with a pod template (/spec/template/spec) such as StatefulSet, Deployment, DaemonSet, Job, etc.
 
 By default it ensures:
 
 - `net.ipv4.tcp_retries2=5`
 
 This is useful for workloads that require `tcp_retries2` to be lowered in the pod network namespace
-without patching pods after creation.
+without patching pods after creation. It can be used for any workload easily.
+
+## Quick start
+
+One command generates everything: TLS certs, namespace, TLS Secret, Deployment, Service, and MutatingWebhookConfiguration (with caBundle). 
+The user needs to run it once when installing the webhook. Requires openssl and kubectl in PATH. Run all commands from the project root.
+
+**1. Build the rock and prepare a Docker image (so the cluster can use it):**
+
+```bash
+# Pack the OCI image using rockcraft (see rockcraft.yaml).
+rockcraft pack
+
+# Push the OCI image to your local registry (e.g. MicroK8s registry on port 32000).
+# Replace the rock filename with the one produced by rockcraft pack.
+sudo skopeo copy \
+  oci-archive:./data-platform-k8s-mutator_1.0_amd64.rock \
+  docker://localhost:32000/data-platform-k8s-mutator:1.0 \
+  --dest-tls-verify=false
+```
+
+**2. Generate manifests and apply:**
+
+The app requires `TARGET_CONTAINER_NAMES` to be non-empty. use `--target-container-names` (comma-separated) so the mutator knows which containers to target.
+
+```bash
+# Use the image tag you pushed (e.g. localhost:32000/data-platform-k8s-mutator:1.3). Run from project root:
+# pass the image and which containers to match (required for the webhook to start)
+python -m scripts.bootstrap_webhook --image localhost:32000/data-platform-k8s-mutator:1.0 \
+  --target-container-names targetapp \
+  --target-image-substr targetimage \
+  --target-labels app.kubernetes.io/managed-by=juju
+```
+
+This will:
+
+1. Generate a CA and a server certificate (SANs for `sysctl-webhook.webhooks.svc`)
+2. Write `deploy/` with namespace, TLS Secret, webhook config and Deployment + Service (workload)
+3. Run `kubectl apply -f deploy/` for all of them
+
+
+To only generate manifests use --dry-run option:
+
+```bash
+
+python -m scripts.bootstrap_webhook --dry-run --image localhost:32000/data-platform-k8s-mutator:1.0 \
+  --target-container-names targetapp \
+  --target-image-substr targetimage \
+  --target-labels app.kubernetes.io/managed-by=juju
+```
+
+After generating manifests, deploy Admission Webhook Mutator:
+
+```bash
+kubectl apply -f deploy/
+```
 
 ## Operational guideline (3 prerequisites)
 
 To run this webhook successfully you must enable/configure these 3 items in the cluster.
 
-### 1. cert-manager (TLS + CA injection)
+### 1. TLS and CA bundle
 
-This repository assumes cert-manager provisions the webhook TLS secret using `certs.yaml` and injects the CA bundle into the `MutatingWebhookConfiguration` in the `workload.yaml`.
+The API server calls the webhook over HTTPS and verifies the webhook's server certificate using the CA bundle in `MutatingWebhookConfiguration.clientConfig.caBundle`.
 
-MicroK8s:
+**Recommended (automated in this repo):** Use the built-in scripts so no cert-manager or manual steps are needed:
 
-```bash
-microk8s status --wait-ready
-microk8s enable cert-manager
-microk8s kubectl -n cert-manager get pods
-```
+- **`scripts/gen_webhook_certs.py`** – generates a CA and server cert (OpenSSL), TLS Secret, MutatingWebhookConfiguration (caBundle) and Deployment + Service and writes under `deploy/` directory by default.
+- **`scripts/bootstrap_webhook.py`** – runs the generator then `kubectl apply -f deploy/` for a one-command deploy.
+
+See **Quick start** above. No Python TLS libraries required (script uses OpenSSL).
 
 ### 2. Admission webhooks on the API server
 
@@ -37,51 +88,34 @@ microk8s kubectl -n cert-manager get pods
 - The API server must be able to reach the webhook service. The network policies/firewalls must allow it.
 - The webhook must serve HTTPS and the `MutatingWebhookConfiguration` must contain a trusted CA bundle.
 
-MicroK8s: MutatingAdmissionWebhook is enabled by default. The most useful check is whether it has been explicitly disabled:
+Check that admission registration is available (works on any cluster where `kubectl` is configured):
 
 ```bash
-sudo grep -E -- '--disable-admission-plugins' /var/snap/microk8s/current/args/kube-apiserver
+kubectl api-versions | grep admissionregistration
 ```
 
-If the output contains `MutatingAdmissionWebhook`, remove it from the disabled list and restart MicroK8s:
+You should see `admissionregistration.k8s.io/v1` (and possibly `v1beta1`). If admission webhooks are disabled for your distribution, enable the `MutatingAdmissionWebhook` admission plugin via your cluster's API server configuration and restart the API server. 
+The exact steps depend on your Kubernetes distribution (e.g. kubeadm, managed clusters, or distro-specific config files).
 
-```bash
-microk8s stop
-microk8s start
-microk8s status --wait-ready
-```
-
-You can also inspect what’s enabled:
-
-```bash
-sudo grep -E -- '--enable-admission-plugins' /var/snap/microk8s/current/args/kube-apiserver
-```
-
-### 3. kubelet: allow the unsafe sysctl
+### 3. Kubelet: allow the unsafe sysctl
 
 This webhook only adds the sysctl to the Pod spec. Nodes will still reject pods using unsafe sysctls unless kubelet is configured to allow them.
 
-MicroK8s (kubelet args file):
-
-- Edit `/var/snap/microk8s/current/args/kubelet` and add:
-  - `--allowed-unsafe-sysctls=net.ipv4.tcp_retries2`
-- Restart MicroK8s as above.
+Configure kubelet with `--allowed-unsafe-sysctls=net.ipv4.tcp_retries2` (e.g. in a kubelet config file). 
+Restart the kubelet so the change takes effect.
 
 ## Configuration (environment variables)
 
 - `SYSCTL_NAME` (default: `net.ipv4.tcp_retries2`)
 - `SYSCTL_VALUE` (default: `5`)
-- `TARGET_NAMESPACE` (optional): only mutate objects in this namespace. Leave unset to match all namespaces.
-- `TARGET_LABELS` (optional): comma-separated key=value pairs to match labels
-  `app.kubernetes.io/name=opens211,app.kubernetes.io/managed-by=juju`
-- `REQUIRE_LABELS` (optional): comma-separated key=value pairs that must be present on the object
-- `TARGET_CONTAINER_NAMES` (**required**): comma-separated container names to match (e.g. `opensearch`)
-- `TARGET_IMAGE_SUBSTR` (**required**): only match containers whose image contains this substring
-  (set this env var to an empty string to match any image, the variable must still be present)
+- `TARGET_NAMESPACES` (optional): comma-separated list of namespace names; only mutate objects in one of these. Leave unset or empty to match all namespaces.
+- `TARGET_LABELS` (optional): comma-separated key=value pairs; only mutate objects that have these labels (e.g. `app.kubernetes.io/name=myapp,app.kubernetes.io/managed-by=juju`)
+- `TARGET_CONTAINER_NAMES` (**required**): comma-separated container names to match (e.g. `myapp`)
+- `TARGET_IMAGE_SUBSTR` (optional): only match containers whose image contains this substring; leave unset or empty to match any image
 - `REQUIRE_JUJU_MANAGED` (default: `true`): if true, only mutate objects with
   `app.kubernetes.io/managed-by=juju`
 
-If `TARGET_NAMESPACE`/`TARGET_LABELS` are unset, the webhook will mutate all matching admission requests it receives subject to `TARGET_CONTAINER_NAMES` / `TARGET_IMAGE_SUBSTR` / `REQUIRE_*`.
+If `TARGET_NAMESPACES` and `TARGET_LABELS` are unset, the webhook will mutate all matching admission requests it receives subject to `TARGET_CONTAINER_NAMES` / `TARGET_IMAGE_SUBSTR` / `REQUIRE_JUJU_MANAGED`.
 
 
 - It only adds `securityContext` when it is missing.
@@ -89,12 +123,10 @@ If `TARGET_NAMESPACE`/`TARGET_LABELS` are unset, the webhook will mutate all mat
 
 ## Important
 
-Sysctls are applied by the kubelet at pod creation time. If the webhook is only configured to mutate CREATE operations, it will not change sysctls for existing objects. It only applies to newly-created objects.
-
-Which objects are actually mutated is determined by MutatingWebhookConfiguration rules.
-See `workload.yaml` for the current rule set (resources + operations).
+Sysctls are applied by the kubelet at pod creation time. So it will not change sysctls for existing objects. It only applies to newly-created objects.
 
 ## Manifests
 
-- `certs.yaml`: Namespace + cert-manager Issuer + Certificate that provisions the webhook TLS secret.
-- `workload.yaml`: webhook Deployment/Service/MutatingWebhookConfiguration
+- **`scripts/bootstrap_webhook`** (single entry point): parses all CLI options, calls gen_webhook_certs.generate() to produce CA, server cert, and manifests in deploy/, then runs kubectl apply -f deploy/ unless --dry-run. Run from project root: python -m scripts.bootstrap_webhook.
+- **`scripts/gen_webhook_certs`**: library only: provides GenWebhookCertsConfig and generate(config) used by bootstrap.
+

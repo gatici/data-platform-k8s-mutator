@@ -2,18 +2,12 @@
 # See LICENSE file for licensing details.
 name: data-platform-k8s-mutator
 base: ubuntu@24.04
-version: "1.3"
-summary: Mutating Webhook for sysctls
+version: "1.0"
+summary: Product-agnostic mutating webhook for pod sysctls
 description: |
-  Mutating webhook that injects sysctls into OpenSearch StatefulSets.
+  Mutating admission webhook that injects sysctls (e.g. net.ipv4.tcp_retries2) into
+  Kubernetes workloads at admission time.
 platforms:
   amd64:
 extensions:
   - fastapi-framework
-
-parts:
-  fastapi-framework/install-app:
-    source: .
-    prime:
-      - app/app.py
-      - app/requirements.txt
