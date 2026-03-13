@@ -1,11 +1,12 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""Kubernetes mutating admission webhook that injects a sysctl into workload pod specs.
+"""
+Kubernetes mutating admission webhook that injects a sysctl into workload pod specs.
 
 On CREATE of a StatefulSet, Deployment, or DaemonSet, the webhook returns a JSONPatch to add or update
-spec.securityContext.sysctls (e.g. net.ipv4.tcp_retries2=5).
-Scope and target containers are controlled via environment variables which are described in MutatorConfig.
+spec.securityContext.sysctls (e.g. net.ipv4.tcp_retries2=5). Scope and target
+containers are controlled via environment variables which are described in MutatorConfig.
 """
 
 import base64
@@ -75,7 +76,8 @@ def _parse_label_selector(selector: str) -> dict[str, str]:
 
 
 class MutatorConfig(BaseSettings):
-    """Webhook configuration loaded from environment variables.
+    """
+    Webhook configuration loaded from environment variables.
     Used to decide which objects to mutate and which sysctl to inject.
     """
 
@@ -163,7 +165,9 @@ class MutatorConfig(BaseSettings):
         raw = (v or "").strip()
         names = [n.strip() for n in raw.split(",") if n.strip()]
         if not names:
-            raise ValueError("TARGET_CONTAINER_NAMES must contain at least one container name")
+            raise ValueError(
+                "TARGET_CONTAINER_NAMES must contain at least one container name"
+            )
         return names
 
     @field_validator("target_image_substr", mode="before")
@@ -215,7 +219,9 @@ def _encode_patch_base64(patches: list[Patch]) -> str:
 _POD_TEMPLATE_SPEC_PREFIX = "/spec/template/spec"
 
 
-def _get_pod_spec_and_prefix(k8s_object: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
+def _get_pod_spec_and_prefix(
+    k8s_object: dict[str, Any],
+) -> tuple[dict[str, Any], str] | None:
     """Find the pod spec inside the object and the JSONPatch path prefix to it.
 
     Supported kinds: StatefulSet, Deployment, DaemonSet, ReplicaSet, Job
@@ -311,7 +317,10 @@ def _object_matches_scope(k8s_object: dict[str, Any]) -> bool:
     if not _object_labels_match_config(labels):
         return False
     # managed-by scope, object must be managed by juju (if require_juju_managed is True)
-    if CFG.require_juju_managed and labels.get("app.kubernetes.io/managed-by") != "juju":
+    if (
+        CFG.require_juju_managed
+        and labels.get("app.kubernetes.io/managed-by") != "juju"
+    ):
         return False
 
     pod_spec_info = _get_pod_spec_and_prefix(k8s_object)
@@ -346,7 +355,9 @@ def _build_sysctl_patch_ops(k8s_object: dict[str, Any]) -> list[Patch]:
     # no securityContext: add securityContext with our sysctl
     if security_context is None:
         return [
-            Patch(op="add", path=f"{prefix}/securityContext", value={"sysctls": [entry]}),
+            Patch(
+                op="add", path=f"{prefix}/securityContext", value={"sysctls": [entry]}
+            ),
         ]
 
     # securityContext exists but no sysctls list: add sysctls list with our sysctl
@@ -445,7 +456,9 @@ def mutate_admission_review(admission_review_body: dict = Body(...)) -> dict[str
 
     # malformed request: we just skip our patch.
     if not uid or obj is None or not isinstance(obj, dict):
-        return _admission_review_response(uid or "unknown", "malformed admission request.", [])
+        return _admission_review_response(
+            uid or "unknown", "malformed admission request.", []
+        )
 
     # Only mutate if object matches scope (namespace, labels, managed-by, container match).
     if not _object_matches_scope(obj):
@@ -464,7 +477,9 @@ def mutate_admission_review(admission_review_body: dict = Body(...)) -> dict[str
 
     # return response with patch if we have changes, otherwise object already has the sysctl.
     if patches:
-        webhook.info("Injecting sysctl %s=%s via JSONPatch", CFG.sysctl_name, CFG.sysctl_value)
+        webhook.info(
+            "Injecting sysctl %s=%s via JSONPatch", CFG.sysctl_name, CFG.sysctl_value
+        )
         return _admission_review_response(uid, "Injected pod sysctl.", patches)
 
     # Pod spec already has the configured sysctl with the correct value, no patch.
