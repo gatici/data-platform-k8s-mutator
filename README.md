@@ -70,6 +70,15 @@ uv run python -m scripts.bootstrap_webhook --help
 uv run pytest tests/ -v
 ```
 
+Format and lint (CI uses the same): Use tox so the same Ruff version as CI runs:
+
+```bash
+tox -e fmt    # format with ruff 0.15.6
+tox -e lint  # verify, must pass before pushing
+```
+
+If `tox -e fmt` changes any file, commit those changes so CI passes. Do not rely on `ruff format` from your venv. It may be a different version.
+
 ## Quick start
 
 One command generates everything: TLS certs, namespace, TLS Secret, Deployment, Service, and MutatingWebhookConfiguration (with caBundle). 
