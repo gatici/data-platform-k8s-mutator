@@ -58,17 +58,33 @@ def generate(config: GenWebhookCertsConfig) -> int:
 
     # 1. CA key and cert
     if not ca_crt.exists() or not ca_key.exists():
-        _run([
-            "openssl", "genrsa", "-out", str(ca_key), "2048",
-        ])
-        _run([
-            "openssl", "req", "-x509", "-new", "-nodes",
-            "-key", str(ca_key),
-            "-sha256",
-            "-days", str(config.validity_days),
-            "-out", str(ca_crt),
-            "-subj", "/CN=webhook-ca",
-        ])
+        _run(
+            [
+                "openssl",
+                "genrsa",
+                "-out",
+                str(ca_key),
+                "2048",
+            ]
+        )
+        _run(
+            [
+                "openssl",
+                "req",
+                "-x509",
+                "-new",
+                "-nodes",
+                "-key",
+                str(ca_key),
+                "-sha256",
+                "-days",
+                str(config.validity_days),
+                "-out",
+                str(ca_crt),
+                "-subj",
+                "/CN=webhook-ca",
+            ]
+        )
         print(f"Generated CA: {ca_crt}", file=sys.stderr)
     else:
         print(f"Using existing CA: {ca_crt}", file=sys.stderr)
@@ -76,20 +92,44 @@ def generate(config: GenWebhookCertsConfig) -> int:
     # 2. Server key, CSR, and signed cert
     _run(["openssl", "genrsa", "-out", str(tls_key), "2048"])
     csr_file = out / "tls.csr"
-    _run([
-        "openssl", "req", "-new", "-key", str(tls_key),
-        "-subj", f"/CN={config.service}.{config.namespace}.svc",
-        "-addext", f"subjectAltName={san_line}",
-        "-out", str(csr_file),
-    ])
+    _run(
+        [
+            "openssl",
+            "req",
+            "-new",
+            "-key",
+            str(tls_key),
+            "-subj",
+            f"/CN={config.service}.{config.namespace}.svc",
+            "-addext",
+            f"subjectAltName={san_line}",
+            "-out",
+            str(csr_file),
+        ]
+    )
     extfile = out / "tls.ext"
     extfile.write_text(f"subjectAltName={san_line}\nextendedKeyUsage=serverAuth\n")
-    _run([
-        "openssl", "x509", "-req", "-in", str(csr_file),
-        "-CA", str(ca_crt), "-CAkey", str(ca_key), "-CAcreateserial",
-        "-out", str(tls_crt), "-days", str(config.validity_days),
-        "-sha256", "-extfile", str(extfile),
-    ])
+    _run(
+        [
+            "openssl",
+            "x509",
+            "-req",
+            "-in",
+            str(csr_file),
+            "-CA",
+            str(ca_crt),
+            "-CAkey",
+            str(ca_key),
+            "-CAcreateserial",
+            "-out",
+            str(tls_crt),
+            "-days",
+            str(config.validity_days),
+            "-sha256",
+            "-extfile",
+            str(extfile),
+        ]
+    )
     csr_file.unlink(missing_ok=True)
     extfile.unlink(missing_ok=True)
     print(f"Generated server cert: {tls_crt}", file=sys.stderr)
@@ -154,8 +194,14 @@ metadata:
     # 7. Deployment + Service
     # The webhook app (MutatorConfig) reads list/dict env vars as JSON via pydantic-settings.
     # Convert CLI comma-separated strings into JSON strings for the Deployment env.
-    target_container_names_json = json.dumps([n.strip() for n in config.target_container_names.split(",") if n.strip()])
-    target_namespaces_json = json.dumps([n.strip() for n in config.target_namespaces.split(",") if n.strip()]) if config.target_namespaces.strip() else "[]"
+    target_container_names_json = json.dumps(
+        [n.strip() for n in config.target_container_names.split(",") if n.strip()]
+    )
+    target_namespaces_json = (
+        json.dumps([n.strip() for n in config.target_namespaces.split(",") if n.strip()])
+        if config.target_namespaces.strip()
+        else "[]"
+    )
     # Parse "k1=v1,k2=v2" into a dict, then JSON for TARGET_LABELS.
     target_labels_dict: dict[str, str] = {}
     for part in (config.target_labels or "").strip().split(","):

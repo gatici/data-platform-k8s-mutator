@@ -27,17 +27,38 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Generate webhook certs and all manifests, then apply (or --dry-run to only generate)."
     )
-    parser.add_argument("--dry-run", action="store_true", help="Only generate manifests; do not kubectl apply")
-    parser.add_argument("-o", "--output-dir", type=Path, default=None, help="Output directory (default: deploy/)")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Only generate manifests; do not kubectl apply"
+    )
+    parser.add_argument(
+        "-o", "--output-dir", type=Path, default=None, help="Output directory (default: deploy/)"
+    )
     parser.add_argument("--namespace", default="webhooks", help="Kubernetes namespace for webhook")
     parser.add_argument("--service", default="sysctl-webhook", help="Deployment/Service name")
     parser.add_argument("--secret-name", default="sysctl-webhook-tls", help="TLS Secret name")
-    parser.add_argument("--webhook-config-name", default="sysctl-webhook", help="MutatingWebhookConfiguration name")
-    parser.add_argument("--validity-days", type=int, default=3650, help="Certificate validity in days, by default 10 years")
-    parser.add_argument("--image", default="sysctl-webhook:latest", help="Container image for the webhook")
-    parser.add_argument("--target-namespaces", default="", help="TARGET_NAMESPACES env, comma-separated namespaces to mutate (empty = any)")
-    parser.add_argument("--target-container-names", default="", help="TARGET_CONTAINER_NAMES env (required by app)")
-    parser.add_argument("--target-image-substr", default="", help="TARGET_IMAGE_SUBSTR env; empty = any image")
+    parser.add_argument(
+        "--webhook-config-name", default="sysctl-webhook", help="MutatingWebhookConfiguration name"
+    )
+    parser.add_argument(
+        "--validity-days",
+        type=int,
+        default=3650,
+        help="Certificate validity in days, by default 10 years",
+    )
+    parser.add_argument(
+        "--image", default="sysctl-webhook:latest", help="Container image for the webhook"
+    )
+    parser.add_argument(
+        "--target-namespaces",
+        default="",
+        help="TARGET_NAMESPACES env, comma-separated namespaces to mutate (empty = any)",
+    )
+    parser.add_argument(
+        "--target-container-names", default="", help="TARGET_CONTAINER_NAMES env (required by app)"
+    )
+    parser.add_argument(
+        "--target-image-substr", default="", help="TARGET_IMAGE_SUBSTR env; empty = any image"
+    )
     parser.add_argument("--target-labels", default="", help="TARGET_LABELS env")
     parser.add_argument("--sysctl-name", default="net.ipv4.tcp_retries2", help="SYSCTL_NAME env")
     parser.add_argument("--sysctl-value", default="5", help="SYSCTL_VALUE env")
