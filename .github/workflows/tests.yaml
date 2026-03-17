@@ -62,11 +62,8 @@ jobs:
           ROCK="$(ls ./*.rock 2>/dev/null || true)"
           if [ -z "$ROCK" ]; then ROCK="$(ls build/*.rock 2>/dev/null || true)"; fi
           skopeo copy --insecure-policy "oci-archive:${ROCK}" "docker://localhost:32000/sysctl-webhook:e2e" --dest-tls-verify=false
-      - name: Ensure venv support
-        run: |
-          if ! python3 -m venv --help 2>/dev/null; then
-            sudo apt-get update && sudo apt-get install -y python3-venv
-          fi
+      - name: Install python3-venv
+        run: sudo apt-get update && sudo apt-get install -y python3-venv
       - name: Create venv and install deps
         run: |
           python3 -m venv .venv
