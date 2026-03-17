@@ -58,6 +58,8 @@ jobs:
           if [ -z "$ROCK" ]; then ROCK="$(ls build/*.rock 2>/dev/null || true)"; fi
           skopeo --insecure-policy copy "oci-archive:${ROCK}" "docker-archive:/tmp/sysctl-webhook-e2e.tar:sysctl-webhook:e2e"
           sudo microk8s ctr image import /tmp/sysctl-webhook-e2e.tar
+      - name: Upgrade packaging tools
+        run: python3 -m pip install --upgrade pip setuptools wheel
       - name: Install Python deps
         run: python3 -m pip install -e .
       - name: Bootstrap webhook
