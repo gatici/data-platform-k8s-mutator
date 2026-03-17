@@ -199,7 +199,7 @@ toml = [
 [[package]]
 name = "data-platform-k8s-mutator"
 version = "1.0.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "fastapi", extra = ["standard"] },
     { name = "pydantic" },

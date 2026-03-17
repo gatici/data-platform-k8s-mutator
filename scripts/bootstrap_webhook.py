@@ -94,11 +94,6 @@ def main() -> int:
         "--sysctl-name", default="net.ipv4.tcp_retries2", help="SYSCTL_NAME env"
     )
     parser.add_argument("--sysctl-value", default="5", help="SYSCTL_VALUE env")
-    parser.add_argument(
-        "--image-pull-policy",
-        default="",
-        help="imagePullPolicy for the webhook container (e.g. Never for local images)",
-    )
     args = parser.parse_args()
 
     out_dir = args.output_dir if args.output_dir is not None else repo_root / "deploy"
@@ -117,7 +112,6 @@ def main() -> int:
         target_labels=args.target_labels,
         sysctl_name=args.sysctl_name,
         sysctl_value=args.sysctl_value,
-        image_pull_policy=args.image_pull_policy,
     )
     if generate(config) != 0:
         return 1
@@ -143,7 +137,7 @@ def main() -> int:
     subprocess.run([*_kubectl_cmd(), "apply", "-f", str(workload_path)], check=True)
 
     # Wait for the webhook pod to be ready before registering the webhook.
-    subprocess.run(
+    rollout = subprocess.run(
         [
             *_kubectl_cmd(),
             "rollout",
@@ -153,8 +147,71 @@ def main() -> int:
             config.namespace,
             "--timeout=120s",
         ],
-        check=True,
+        check=False,
     )
+    if rollout.returncode != 0:
+        print("Rollout timed out or failed. Pod diagnostics:", file=sys.stderr)
+        get_pods = subprocess.run(
+            [
+                *_kubectl_cmd(),
+                "get",
+                "pods",
+                "-n",
+                config.namespace,
+                "-l",
+                f"app={config.service}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        print(get_pods.stdout or "", file=sys.stderr)
+        if get_pods.stderr:
+            print(get_pods.stderr, file=sys.stderr)
+        subprocess.run(
+            [
+                *_kubectl_cmd(),
+                "describe",
+                "pod",
+                "-n",
+                config.namespace,
+                "-l",
+                f"app={config.service}",
+            ],
+            check=False,
+        )
+        print("Recent logs (each pod):", file=sys.stderr)
+        list_pods = subprocess.run(
+            [
+                *_kubectl_cmd(),
+                "get",
+                "pods",
+                "-n",
+                config.namespace,
+                "-l",
+                f"app={config.service}",
+                "-o",
+                "name",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        for pod_name in (list_pods.stdout or "").strip().splitlines():
+            pod_name = pod_name.strip()
+            if pod_name:
+                subprocess.run(
+                    [
+                        *_kubectl_cmd(),
+                        "logs",
+                        "-n",
+                        config.namespace,
+                        pod_name,
+                        "--tail=50",
+                    ],
+                    check=False,
+                )
+        return 1
 
     # Now register the webhook so the API server sends admission requests to it.
     webhook_config_path = out_dir / "webhook-config.yaml"

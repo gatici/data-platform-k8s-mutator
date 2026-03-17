@@ -42,35 +42,45 @@ jobs:
           echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
       - name: Install kubectl
         run: sudo snap install kubectl --classic
+      - name: Enable MicroK8s local registry
+        run: |
+          sudo microk8s enable registry
+          kubectl wait --for=condition=ready pod -l app=registry -n container-registry --timeout=120s 2>/dev/null || true
+          sleep 5
       - name: Install rockcraft, skopeo and LXD
         run: |
           sudo snap install rockcraft --classic
           sudo snap install lxd
           sudo lxd init --auto
-          sudo apt-get update && sudo apt-get install -y skopeo
+          sudo apt-get update && sudo apt-get install -y skopeo uidmap
       - name: Build webhook image with rockcraft
         run: rockcraft pack
         env:
           ROCKCRAFT_ENABLE_EXPERIMENTAL_EXTENSIONS: "true"
-      - name: Load image into MicroK8s
+      - name: Push image to MicroK8s local registry
         run: |
           ROCK="$(ls ./*.rock 2>/dev/null || true)"
           if [ -z "$ROCK" ]; then ROCK="$(ls build/*.rock 2>/dev/null || true)"; fi
-          skopeo --insecure-policy copy "oci-archive:${ROCK}" "docker-archive:/tmp/sysctl-webhook-e2e.tar:sysctl-webhook:e2e"
-          sudo microk8s ctr image import /tmp/sysctl-webhook-e2e.tar
-      - name: Upgrade packaging tools
-        run: python3 -m pip install --upgrade pip setuptools wheel
-      - name: Install Python deps
-        run: python3 -m pip install -e .
+          skopeo copy --insecure-policy "oci-archive:${ROCK}" "docker://localhost:32000/sysctl-webhook:e2e" --dest-tls-verify=false
+      - name: Ensure venv support
+        run: |
+          if ! python3 -m venv --help 2>/dev/null; then
+            sudo apt-get update && sudo apt-get install -y python3-venv
+          fi
+      - name: Create venv and install deps
+        run: |
+          python3 -m venv .venv
+          echo "$GITHUB_WORKSPACE/.venv/bin:$PATH" >> "$GITHUB_ENV"
+          .venv/bin/pip install --upgrade pip setuptools wheel
+          .venv/bin/pip install -e .
       - name: Bootstrap webhook
         run: |
           python3 -m scripts.bootstrap_webhook \
-            --image sysctl-webhook:e2e \
+            --image localhost:32000/sysctl-webhook:e2e \
             --namespace default \
             --target-container-names app \
             --target-labels "app.kubernetes.io/managed-by=juju" \
-            --target-namespaces default \
-            --image-pull-policy Never
+            --target-namespaces default
       - name: Wait for webhook
         run: kubectl rollout status deployment/sysctl-webhook -n default --timeout=120s
       - name: Wait for webhook to accept connections

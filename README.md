@@ -171,3 +171,12 @@ Sysctls are applied by the kubelet at pod creation time. So it will not change s
     server cert, and manifests in deploy/, then runs kubectl apply -f deploy/ unless --dry-run. Run from project root: `uv run python -m scripts.bootstrap_webhook`.
 - **`scripts/gen_webhook_certs`**: library only: provides GenWebhookCertsConfig and generate(config) used by bootstrap.
 
+## Multiple webhooks in the same cluster
+Several mutator webhooks (different sysctls or scopes) can be deployed in a single K8s cluster. But, it is needed to give each instance a unique name so their resources do not collide:
+
+- `--webhook-config-name`: name of the MutatingWebhookConfiguration (must be unique cluster-wide).
+- `--service`: Deployment and Service name (unique per namespace).
+- `--secret-name`: TLS secret name (unique per namespace).
+- Optionally use a dedicated `--namespace` per webhook.
+
+Bootstrap only deletes the MutatingWebhookConfiguration with the given `--webhook-config-name`, so other mutators are unaffected.
