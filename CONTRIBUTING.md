@@ -40,3 +40,18 @@ pre-commit install
 ```
 
 Run `pre-commit run --all-files` once to format everything.
+
+## Manual testing
+
+For local cluster e2e:
+
+1. Build the webhook image with rockcraft (same as CI): run `rockcraft pack`, then use skopeo to export the `.rock` to a tar and load it into MicroK8s (see the `integration-k8s` job in `.github/workflows/tests.yaml` for the exact commands).
+
+2. Bootstrap the webhook and run the e2e test. The test Deployment is in `integration/cluster/test_deployment.yaml` and must match the webhook scope (e.g. namespace `default`, label `app.kubernetes.io/managed-by: juju`, container name `app`).
+
+```bash
+export KUBECONFIG=...   # e.g. microk8s config > ~/.kube/config
+python3 -m integration.cluster.run_e2e
+```
+
+If `kubectl` is not in PATH, set `KUBECTL="microk8s kubectl"` (use a space, not a dot).

@@ -1,0 +1,73 @@
+name: Tests
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: [self-hosted, linux, X64, jammy, large]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install tox
+        run: python3 -m pip install tox
+      - name: Unit tests
+        run: tox -e unit
+      - name: Integration tests
+        run: tox -e integration
+
+  integration-k8s:
+    name: E2E on MicroK8s
+    runs-on: [self-hosted, linux, X64, jammy, large]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install MicroK8s
+        run: |
+          sudo snap install microk8s --classic
+          sudo microk8s status --wait-ready
+      - name: Set up kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          sudo microk8s config > ~/.kube/config
+          sudo chown "$USER:$USER" ~/.kube/config
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+      - name: Install kubectl
+        run: sudo snap install kubectl --classic
+      - name: Install rockcraft, skopeo and LXD
+        run: |
+          sudo snap install rockcraft --classic
+          sudo snap install lxd
+          sudo lxd init --auto
+          sudo apt-get update && sudo apt-get install -y skopeo
+      - name: Build webhook image with rockcraft
+        run: rockcraft pack
+      - name: Load image into MicroK8s
+        run: |
+          ROCK="$(ls ./*.rock 2>/dev/null || true)"
+          if [ -z "$ROCK" ]; then ROCK="$(ls build/*.rock 2>/dev/null || true)"; fi
+          skopeo --insecure-policy copy "oci-archive:${ROCK}" "docker-archive:/tmp/sysctl-webhook-e2e.tar:sysctl-webhook:e2e"
+          sudo microk8s ctr image import /tmp/sysctl-webhook-e2e.tar
+      - name: Install Python deps
+        run: python3 -m pip install -e .
+      - name: Bootstrap webhook
+        run: |
+          python3 -m scripts.bootstrap_webhook \
+            --image sysctl-webhook:e2e \
+            --namespace default \
+            --target-container-names app \
+            --target-labels "app.kubernetes.io/managed-by=juju" \
+            --target-namespaces default \
+            --image-pull-policy Never
+      - name: Wait for webhook
+        run: kubectl rollout status deployment/sysctl-webhook -n default --timeout=120s
+      - name: Run cluster e2e
+        run: python3 -m integration.cluster.run_e2e

@@ -1,4 +1,3 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
-
-"""Scripts package: bootstrap_webhook and gen_webhook_certs."""
+"""E2e tests that running on a real Kubernetes(MicroK8s)."""

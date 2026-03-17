@@ -15,11 +15,21 @@ Usage:
 """
 
 import argparse
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from scripts.gen_webhook_certs import GenWebhookCertsConfig, generate
+
+
+def _kubectl_cmd() -> list[str]:
+    if os.environ.get("KUBECTL"):
+        return os.environ.get("KUBECTL", "").split()
+    if shutil.which("kubectl"):
+        return ["kubectl"]
+    return ["microk8s", "kubectl"]
 
 
 def main() -> int:
@@ -40,7 +50,7 @@ def main() -> int:
         help="Output directory (default: deploy/)",
     )
     parser.add_argument(
-        "--namespace", default="webhooks", help="Kubernetes namespace for webhook"
+        "--namespace", default="default", help="Kubernetes namespace for webhook"
     )
     parser.add_argument(
         "--service", default="sysctl-webhook", help="Deployment/Service name"
@@ -84,6 +94,11 @@ def main() -> int:
         "--sysctl-name", default="net.ipv4.tcp_retries2", help="SYSCTL_NAME env"
     )
     parser.add_argument("--sysctl-value", default="5", help="SYSCTL_VALUE env")
+    parser.add_argument(
+        "--image-pull-policy",
+        default="",
+        help="imagePullPolicy for the webhook container (e.g. Never for local images)",
+    )
     args = parser.parse_args()
 
     out_dir = args.output_dir if args.output_dir is not None else repo_root / "deploy"
@@ -102,6 +117,7 @@ def main() -> int:
         target_labels=args.target_labels,
         sysctl_name=args.sysctl_name,
         sysctl_value=args.sysctl_value,
+        image_pull_policy=args.image_pull_policy,
     )
     if generate(config) != 0:
         return 1
@@ -111,14 +127,45 @@ def main() -> int:
         print(f"Generated files in {out_dir}/")
         return 0
 
-    for f in ["namespace.yaml", "secret.yaml", "webhook-config.yaml", "workload.yaml"]:
+    # Apply namespace and secret first.
+    for f in ["namespace.yaml", "secret.yaml"]:
         path = out_dir / f
         if not path.exists():
             print(f"Missing {path}", file=sys.stderr)
             return 1
-        subprocess.run(["kubectl", "apply", "-f", str(path)], check=True)
+        subprocess.run([*_kubectl_cmd(), "apply", "-f", str(path)], check=True)
 
-    print("Bootstrap complete. Webhook is running with TLS (no cert-manager).")
+    # Apply workload so the webhook pod can start.
+    workload_path = out_dir / "workload.yaml"
+    if not workload_path.exists():
+        print(f"Missing {workload_path}", file=sys.stderr)
+        return 1
+    subprocess.run([*_kubectl_cmd(), "apply", "-f", str(workload_path)], check=True)
+
+    # Wait for the webhook pod to be ready before registering the webhook.
+    subprocess.run(
+        [
+            *_kubectl_cmd(),
+            "rollout",
+            "status",
+            f"deployment/{config.service}",
+            "-n",
+            config.namespace,
+            "--timeout=120s",
+        ],
+        check=True,
+    )
+
+    # Now register the webhook so the API server sends admission requests to it.
+    webhook_config_path = out_dir / "webhook-config.yaml"
+    if not webhook_config_path.exists():
+        print(f"Missing {webhook_config_path}", file=sys.stderr)
+        return 1
+    subprocess.run(
+        [*_kubectl_cmd(), "apply", "-f", str(webhook_config_path)], check=True
+    )
+
+    print("Bootstrap complete. Webhook is running.")
     return 0
 
 
