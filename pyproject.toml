@@ -1,6 +1,17 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["scripts*", "integration*"]
+
+[tool.setuptools.py-modules]
+names = ["app"]
+
 [project]
 name = "data-platform-k8s-mutator"
 version = "1.0.0"
