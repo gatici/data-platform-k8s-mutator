@@ -50,6 +50,8 @@ jobs:
           sudo apt-get update && sudo apt-get install -y skopeo
       - name: Build webhook image with rockcraft
         run: rockcraft pack
+        env:
+          ROCKCRAFT_ENABLE_EXPERIMENTAL_EXTENSIONS: "true"
       - name: Load image into MicroK8s
         run: |
           ROCK="$(ls ./*.rock 2>/dev/null || true)"
