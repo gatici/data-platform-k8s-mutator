@@ -9,8 +9,8 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["scripts*", "integration*"]
 
-[tool.setuptools.py-modules]
-names = ["app"]
+[tool.setuptools]
+py-modules = ["app"]
 
 [project]
 name = "data-platform-k8s-mutator"
