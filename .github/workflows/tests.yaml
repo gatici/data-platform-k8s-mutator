@@ -73,5 +73,7 @@ jobs:
             --image-pull-policy Never
       - name: Wait for webhook
         run: kubectl rollout status deployment/sysctl-webhook -n default --timeout=120s
+      - name: Wait for webhook to accept connections
+        run: sleep 15
       - name: Run cluster e2e
         run: python3 -m integration.cluster.run_e2e
