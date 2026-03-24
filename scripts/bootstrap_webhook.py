@@ -12,6 +12,7 @@ Usage:
   python -m scripts.bootstrap_webhook --image myimage/mutator:v1 --target-container-names myapp
   python -m scripts.bootstrap_webhook --dry-run
   python -m scripts.bootstrap_webhook --namespace myns --sysctl-name net.ipv4.tcp_retries2 --sysctl-value 5
+  python -m scripts.bootstrap_webhook --kubectl /snap/bin/kubectl  # Canonical K8s, microk8s, etc.
 """
 
 import argparse
@@ -24,7 +25,9 @@ from pathlib import Path
 from scripts.gen_webhook_certs import GenWebhookCertsConfig, generate
 
 
-def _kubectl_cmd() -> list[str]:
+def _kubectl_cmd(kubectl: str | None = None) -> list[str]:
+    if kubectl:
+        return kubectl.split()
     if os.environ.get("KUBECTL"):
         return os.environ.get("KUBECTL", "").split()
     if shutil.which("kubectl"):
@@ -41,6 +44,11 @@ def main() -> int:
         "--dry-run",
         action="store_true",
         help="Only generate manifests; do not kubectl apply",
+    )
+    parser.add_argument(
+        "--kubectl",
+        default=None,
+        help="Path or command for kubectl (default: KUBECTL env, else kubectl, else microk8s kubectl)",
     )
     parser.add_argument(
         "-o",
@@ -97,6 +105,7 @@ def main() -> int:
     args = parser.parse_args()
 
     out_dir = args.output_dir if args.output_dir is not None else repo_root / "deploy"
+    kubectl_cmd = _kubectl_cmd(args.kubectl)
 
     config = GenWebhookCertsConfig(
         output_dir=out_dir,
@@ -127,19 +136,19 @@ def main() -> int:
         if not path.exists():
             print(f"Missing {path}", file=sys.stderr)
             return 1
-        subprocess.run([*_kubectl_cmd(), "apply", "-f", str(path)], check=True)
+        subprocess.run([*kubectl_cmd, "apply", "-f", str(path)], check=True)
 
     # Apply workload so the webhook pod can start.
     workload_path = out_dir / "workload.yaml"
     if not workload_path.exists():
         print(f"Missing {workload_path}", file=sys.stderr)
         return 1
-    subprocess.run([*_kubectl_cmd(), "apply", "-f", str(workload_path)], check=True)
+    subprocess.run([*kubectl_cmd, "apply", "-f", str(workload_path)], check=True)
 
     # Wait for the webhook pod to be ready before registering the webhook.
     rollout = subprocess.run(
         [
-            *_kubectl_cmd(),
+            *kubectl_cmd,
             "rollout",
             "status",
             f"deployment/{config.service}",
@@ -153,7 +162,7 @@ def main() -> int:
         print("Rollout timed out or failed. Pod diagnostics:", file=sys.stderr)
         get_pods = subprocess.run(
             [
-                *_kubectl_cmd(),
+                *kubectl_cmd,
                 "get",
                 "pods",
                 "-n",
@@ -170,7 +179,7 @@ def main() -> int:
             print(get_pods.stderr, file=sys.stderr)
         subprocess.run(
             [
-                *_kubectl_cmd(),
+                *kubectl_cmd,
                 "describe",
                 "pod",
                 "-n",
@@ -183,7 +192,7 @@ def main() -> int:
         print("Recent logs (each pod):", file=sys.stderr)
         list_pods = subprocess.run(
             [
-                *_kubectl_cmd(),
+                *kubectl_cmd,
                 "get",
                 "pods",
                 "-n",
@@ -202,7 +211,7 @@ def main() -> int:
             if pod_name:
                 subprocess.run(
                     [
-                        *_kubectl_cmd(),
+                        *kubectl_cmd,
                         "logs",
                         "-n",
                         config.namespace,
@@ -218,9 +227,7 @@ def main() -> int:
     if not webhook_config_path.exists():
         print(f"Missing {webhook_config_path}", file=sys.stderr)
         return 1
-    subprocess.run(
-        [*_kubectl_cmd(), "apply", "-f", str(webhook_config_path)], check=True
-    )
+    subprocess.run([*kubectl_cmd, "apply", "-f", str(webhook_config_path)], check=True)
 
     print("Bootstrap complete. Webhook is running.")
     return 0

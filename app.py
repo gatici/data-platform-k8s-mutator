@@ -24,6 +24,23 @@ webhook = logging.getLogger(__name__)
 webhook.setLevel(logging.INFO)
 logging.basicConfig(format="[%(asctime)s] %(levelname)s: %(message)s")
 
+
+# ---------------------------------------------------------
+# JSONPatch types
+
+
+class Patch(BaseModel):
+    """Single JSONPatch operation (op, path, value)."""
+
+    op: str
+    path: str
+    value: Any | None = None
+
+
+# JSONPatch path prefix for workloads that use spec.template.spec
+_POD_TEMPLATE_SPEC_PREFIX = "/spec/template/spec"
+
+
 # -------------------------------------------------------------------------
 # Helpers for config parsing
 
@@ -56,7 +73,7 @@ def _parse_label_selector(selector: str) -> dict[str, str]:
         ValueError: If an entry has no "=" or has an empty key.
     """
     labels: dict[str, str] = {}
-    for entry in (selector or "").strip().split(","):
+    for entry in selector.strip().split(","):
         entry = entry.strip()
         if not entry:
             continue
@@ -187,16 +204,8 @@ class MutatorConfig(BaseSettings):
 CFG = MutatorConfig()
 
 
-# -----------------------------------------------------------------------------
-# JSONPatch and AdmissionReview types
-
-
-class Patch(BaseModel):
-    """Single JSONPatch operation (op, path, value)."""
-
-    op: str
-    path: str
-    value: Any | None = None
+# -------------------------------------------------
+# AdmissionReview helpers
 
 
 def _encode_patch_base64(patches: list[Patch]) -> str:
@@ -215,10 +224,6 @@ def _encode_patch_base64(patches: list[Patch]) -> str:
 # Locating the pod spec in different workload types
 
 
-# JSONPatch path prefix for workloads that use spec.template.spec
-_POD_TEMPLATE_SPEC_PREFIX = "/spec/template/spec"
-
-
 def _get_pod_spec_and_prefix(
     k8s_object: dict[str, Any],
 ) -> tuple[dict[str, Any], str] | None:
@@ -234,7 +239,7 @@ def _get_pod_spec_and_prefix(
         (pod_spec, jsonpatch_prefix) for the pod template spec, or None if
         the object has no spec.template.spec.
     """
-    spec = k8s_object.get("spec") or {}
+    spec = k8s_object.get("spec")
     if not isinstance(spec, dict):
         return None
 
@@ -281,7 +286,7 @@ def _pod_spec_has_matching_container(pod_spec: dict[str, Any]) -> bool:
         True if any container matches CFG.target_container_names (if set) and
         CFG.target_image_substr (if set), False otherwise.
     """
-    for container in pod_spec.get("containers") or []:
+    for container in pod_spec.get("containers", []):
         if not isinstance(container, dict):
             continue
         name = container.get("name") or ""

@@ -63,7 +63,11 @@ The user needs to run it once when installing the webhook. Requires openssl and 
 1. Build the rock and prepare a Docker image (so the cluster can use it):
 
 ```bash
-# Pack the OCI image using rockcraft (see rockcraft.yaml).
+# Install rockcraft from latest/edge for fastapi-framework extension
+sudo snap install rockcraft --classic --channel latest/edge
+sudo snap install lxd && sudo lxd init --auto
+
+# Pack the OCI image using rockcraft
 rockcraft pack
 
 # Push the OCI image to your local registry (e.g. MicroK8s registry on port 32000).

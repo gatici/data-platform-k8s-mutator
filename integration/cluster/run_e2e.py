@@ -5,14 +5,27 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
+from tenacity import retry, stop_after_attempt, wait_fixed
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s: %(message)s",
+    stream=sys.stderr,
+)
+log = logging.getLogger(__name__)
+
 MANIFEST = Path(__file__).resolve().parent / "test_deployment.yaml"
+
+
+class SysctlNotReadyError(Exception):
+    """Raised when the webhook-injected sysctl is not yet present."""
 
 
 def kubectl(*args: str) -> subprocess.CompletedProcess:
@@ -24,29 +37,39 @@ def kubectl(*args: str) -> subprocess.CompletedProcess:
 def main() -> int:
     r = kubectl("apply", "-f", str(MANIFEST))
     if r.returncode != 0:
-        print(r.stderr or r.stdout, file=sys.stderr)
+        log.error(r.stderr or r.stdout)
         return 1
 
-    # Poll up to 30 times (2s each) for the webhook-injected sysctl to appear in the deployment spec.
-    for _ in range(30):
+    @retry(
+        stop=stop_after_attempt(30),
+        wait=wait_fixed(2),
+        reraise=True,
+    )
+    def _wait_for_sysctl() -> None:
         r = kubectl("get", "deployment", "e2e-test-app", "-n", "default", "-o", "json")
         if r.returncode != 0:
-            time.sleep(2)
-            continue
+            raise SysctlNotReadyError(r.stderr or r.stdout or "kubectl get failed")
         spec = json.loads(r.stdout).get("spec", {}).get("template", {}).get("spec") or {}
         sysctls = (spec.get("securityContext") or {}).get("sysctls") or []
-        if any(s.get("name") == "net.ipv4.tcp_retries2" and str(s.get("value")) == "5" for s in sysctls):
-            print("OK: deployment has sysctl net.ipv4.tcp_retries2=5")
-            kubectl("delete", "-f", str(MANIFEST), "--ignore-not-found=true", "--wait=false")
-            return 0
-        time.sleep(2)
+        if not any(
+            s.get("name") == "net.ipv4.tcp_retries2" and str(s.get("value")) == "5"
+            for s in sysctls
+        ):
+            raise SysctlNotReadyError("sysctl not yet present")
 
-    print("Timeout: deployment spec did not get sysctl net.ipv4.tcp_retries2=5", file=sys.stderr)
-    r = kubectl("get", "deployment", "e2e-test-app", "-n", "default", "-o", "json")
-    if r.returncode == 0:
-        spec = json.loads(r.stdout).get("spec", {}).get("template", {}).get("spec") or {}
-        print(json.dumps(spec, indent=2), file=sys.stderr)
-    return 1
+    try:
+        _wait_for_sysctl()
+    except SysctlNotReadyError:
+        log.error("Timeout: deployment spec did not get sysctl net.ipv4.tcp_retries2=5")
+        r = kubectl("get", "deployment", "e2e-test-app", "-n", "default", "-o", "json")
+        if r.returncode == 0:
+            spec = json.loads(r.stdout).get("spec", {}).get("template", {}).get("spec") or {}
+            log.error(json.dumps(spec, indent=2))
+        return 1
+
+    log.info("OK: deployment has sysctl net.ipv4.tcp_retries2=5")
+    kubectl("delete", "-f", str(MANIFEST), "--ignore-not-found=true", "--wait=false")
+    return 0
 
 
 if __name__ == "__main__":

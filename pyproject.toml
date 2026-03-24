@@ -9,6 +9,9 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["scripts*", "integration*"]
 
+[tool.setuptools.package-data]
+"scripts" = ["templates/*.j2"]
+
 [tool.setuptools]
 py-modules = ["app"]
 
@@ -23,6 +26,8 @@ dependencies = [
     "pydantic-settings>=2.0,<3.0",
     "fastapi[standard]",
     "uvicorn",
+    "jinja2>=3.0",
+    "tenacity>=8.0",
 ]
 
 [tool.ruff]
